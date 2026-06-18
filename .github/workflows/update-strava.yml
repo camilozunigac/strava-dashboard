@@ -1,0 +1,59 @@
+name: Update Strava Data
+
+on:
+  schedule:
+    - cron: '0 8,20 * * *'  # corre 2x al día: 8am y 8pm UTC
+  workflow_dispatch:  # permite correrlo manualmente
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch Strava activities
+        env:
+          STRAVA_REFRESH_TOKEN: ${{ secrets.STRAVA_REFRESH_TOKEN }}
+        run: |
+          # Renovar token
+          TOKEN_RESPONSE=$(curl -s -X POST https://www.strava.com/oauth/token \
+            -d client_id=256725 \
+            -d client_secret=5c09adec17d03f7dcf13323e98c21092f0bc632e \
+            -d refresh_token=$STRAVA_REFRESH_TOKEN \
+            -d grant_type=refresh_token)
+          
+          ACCESS_TOKEN=$(echo $TOKEN_RESPONSE | python3 -c "import sys,json; print(json.load(sys.stdin)['access_token'])")
+          NEW_REFRESH=$(echo $TOKEN_RESPONSE | python3 -c "import sys,json; print(json.load(sys.stdin)['refresh_token'])")
+          
+          # Bajar actividades
+          curl -s "https://www.strava.com/api/v3/athlete/activities?per_page=60&page=1" \
+            -H "Authorization: Bearer $ACCESS_TOKEN" > /tmp/raw.json
+          
+          # Filtrar campos necesarios
+          python3 << 'EOF'
+          import json
+          with open('/tmp/raw.json') as f:
+              acts = json.load(f)
+          out = [{'id':str(a['id']),'name':a['name'],'date':a['start_date_local'][:10],
+                  'dist':round(a['distance']),'moving':a['moving_time'],
+                  'elev':round(a.get('total_elevation_gain',0)),
+                  'cals':a.get('calories') or round(a['distance']/1000*65),
+                  'cadence':round(a.get('average_cadence') or 0,1),
+                  'effort':a.get('suffer_score') or round(a['distance']/1000*4),
+                  'prs':a.get('pr_count',0)}
+                 for a in acts if a.get('type')=='Run' and a['distance']>1000]
+          with open('runs.json','w') as f:
+              json.dump(out, f)
+          print(f'✅ {len(out)} runs guardados')
+          EOF
+          
+          # Guardar nuevo refresh token
+          echo $NEW_REFRESH > refresh_token.txt
+
+      - name: Commit updated data
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add runs.json refresh_token.txt
+          git diff --staged --quiet || git commit -m "Update Strava data $(date -u +%Y-%m-%d)"
+          git push
